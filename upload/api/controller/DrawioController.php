@@ -54,6 +54,47 @@ final class DrawioController
         return (int)($stmt->fetchColumn() ?: 0);
     }
 
+    private function organizationId(): int
+    {
+        $actor = $this->actor();
+        if ($this->container->has('service.organization_context')) {
+            try {
+                $resolved = $this->container->get('service.organization_context')->resolve($this->container->get('request'), $actor);
+                if (($resolved['status'] ?? '') === 'active' && is_array($resolved['organization'] ?? null)) {
+                    return max(0, (int)($resolved['organization']['id'] ?? 0));
+                }
+            } catch (\Throwable) {
+                return 0;
+            }
+            return 0;
+        }
+        // This module stores workspace-scoped records. Never infer the active
+        // tenant from an actor field when the trusted context service is not
+        // available (a user can belong to several workspaces).
+        return 0;
+    }
+
+    private function hasWorkspace(): bool
+    {
+        return $this->organizationId() > 0;
+    }
+
+    private function knowledgePageBelongsToWorkspace(string $pagePublicId, int $organizationId): bool
+    {
+        if ($pagePublicId === '') return true;
+        if ($organizationId <= 0 || !$this->hasPermission('knowledge.view') || strlen($pagePublicId) > 64) return false;
+        try {
+            $stmt = $this->pdo->prepare(
+                'SELECT 1 FROM knowledge_pages p INNER JOIN knowledge_spaces s ON s.id = p.space_id WHERE p.public_id = :public_id AND p.organization_id = :page_org AND s.organization_id = :space_org AND p.deleted_at IS NULL LIMIT 1'
+            );
+            $stmt->execute(['public_id' => $pagePublicId, 'page_org' => $organizationId, 'space_org' => $organizationId]);
+            return (bool)$stmt->fetchColumn();
+        } catch (\Throwable) {
+            // Fail closed on installations whose knowledge schema has not been upgraded.
+            return false;
+        }
+    }
+
     private function hasPermission(string $code): bool
     {
         $user = $this->actor();
@@ -87,6 +128,8 @@ final class DrawioController
 
     public function listDiagrams(): JsonResponse
     {
+        $organizationId = $this->organizationId();
+        if ($organizationId <= 0) return JsonResponse::error('WORKSPACE_REQUIRED', 'Select an active workspace', 409);
         if (!$this->hasPermission('module.drawio.view') && !$this->hasPermission('module.drawio.manage')) {
             return JsonResponse::error('FORBIDDEN', 'Insufficient permissions', 403);
         }
@@ -98,7 +141,7 @@ final class DrawioController
         $userId = $this->actorUserId();
 
         $diagrams = array_values(array_filter(
-            $this->repo->listDiagrams($pagePublicId !== '' ? $pagePublicId : null),
+            $this->repo->listDiagrams($organizationId, $pagePublicId !== '' ? $pagePublicId : null),
             function ($d) use ($isManager, $userId) {
                 return $isManager || (int)($d['created_by_user_id'] ?? 0) === $userId;
             }
@@ -112,11 +155,13 @@ final class DrawioController
      */
     public function getDiagram(array $params): JsonResponse
     {
+        $organizationId = $this->organizationId();
+        if ($organizationId <= 0) return JsonResponse::error('WORKSPACE_REQUIRED', 'Select an active workspace', 409);
         if (!$this->hasPermission('module.drawio.view') && !$this->hasPermission('module.drawio.manage')) {
             return JsonResponse::error('FORBIDDEN', 'Insufficient permissions', 403);
         }
 
-        $diagram = $this->repo->getDiagram((string)$params['public_id']);
+        $diagram = $this->repo->getDiagram($organizationId, (string)($params['public_id'] ?? ''));
         if (!$diagram) {
             return JsonResponse::error('NOT_FOUND', 'Diagram not found', 404);
         }
@@ -129,6 +174,8 @@ final class DrawioController
 
     public function createDiagram(): JsonResponse
     {
+        $organizationId = $this->organizationId();
+        if ($organizationId <= 0) return JsonResponse::error('WORKSPACE_REQUIRED', 'Select an active workspace', 409);
         if (!$this->hasPermission('module.drawio.manage')) {
             return JsonResponse::error('FORBIDDEN', 'Insufficient permissions', 403);
         }
@@ -137,7 +184,7 @@ final class DrawioController
         $title = trim((string)($body['title'] ?? ''));
         $xml = (string)($body['xml_content'] ?? $body['xml'] ?? '');
 
-        if ($title === '') {
+        if ($title === '' || strlen($title) > 255 || preg_match('/[\\x00-\\x1F\\x7F]/', $title)) {
             return JsonResponse::error('VALIDATION_ERROR', 'Title is required', 422);
         }
         if (trim($xml) === '') {
@@ -148,10 +195,15 @@ final class DrawioController
         if (strlen($xml) > $maxBytes) {
             return JsonResponse::error('DIAGRAM_TOO_LARGE', 'Diagram XML exceeds the size limit', 422);
         }
+        $pagePublicId = trim((string)($body['page_public_id'] ?? ''));
+        if (strlen($pagePublicId) > 64 || !$this->knowledgePageBelongsToWorkspace($pagePublicId, $organizationId)) {
+            return JsonResponse::error('KNOWLEDGE_PAGE_NOT_FOUND', 'Knowledge page not found in this workspace', 404);
+        }
 
         $diagram = $this->repo->createDiagram([
             'title' => $title,
-            'page_public_id' => trim((string)($body['page_public_id'] ?? '')) ?: null,
+            'page_public_id' => $pagePublicId !== '' ? $pagePublicId : null,
+            'organization_id' => $organizationId,
             'xml_content' => $xml,
             'created_by_user_id' => $this->actorUserId(),
         ]);
@@ -164,11 +216,14 @@ final class DrawioController
      */
     public function updateDiagram(array $params): JsonResponse
     {
+        $organizationId = $this->organizationId();
+        if ($organizationId <= 0) return JsonResponse::error('WORKSPACE_REQUIRED', 'Select an active workspace', 409);
         if (!$this->hasPermission('module.drawio.manage')) {
             return JsonResponse::error('FORBIDDEN', 'Insufficient permissions', 403);
         }
 
-        $diagram = $this->repo->getDiagram((string)$params['public_id']);
+        $publicId = (string)($params['public_id'] ?? '');
+        $diagram = $this->repo->getDiagram($organizationId, $publicId);
         if (!$diagram) {
             return JsonResponse::error('NOT_FOUND', 'Diagram not found', 404);
         }
@@ -180,27 +235,31 @@ final class DrawioController
         $update = [];
         if (array_key_exists('title', $body)) {
             $title = trim((string)$body['title']);
-            if ($title === '') {
+            if ($title === '' || strlen($title) > 255 || preg_match('/[\\x00-\\x1F\\x7F]/', $title)) {
                 return JsonResponse::error('VALIDATION_ERROR', 'Title is required', 422);
             }
             $update['title'] = $title;
         }
         if (array_key_exists('page_public_id', $body)) {
-            $update['page_public_id'] = trim((string)$body['page_public_id']) ?: null;
+            $pagePublicId = trim((string)$body['page_public_id']);
+            if (strlen($pagePublicId) > 64 || !$this->knowledgePageBelongsToWorkspace($pagePublicId, $organizationId)) {
+                return JsonResponse::error('KNOWLEDGE_PAGE_NOT_FOUND', 'Knowledge page not found in this workspace', 404);
+            }
+            $update['page_public_id'] = $pagePublicId !== '' ? $pagePublicId : null;
         }
         if (array_key_exists('xml_content', $body) || array_key_exists('xml', $body)) {
             $xml = (string)($body['xml_content'] ?? $body['xml'] ?? '');
-            if (strlen($xml) > 2000000) {
+            if ($xml === '' || strlen($xml) > 2000000) {
                 return JsonResponse::error('DIAGRAM_TOO_LARGE', 'Diagram XML exceeds the size limit', 422);
             }
             $update['xml_content'] = $xml;
         }
 
         if ($update !== []) {
-            $this->repo->updateDiagram((string)$params['public_id'], $update);
+            $this->repo->updateDiagram($organizationId, $publicId, $update);
         }
 
-        return JsonResponse::success('DIAGRAM_UPDATED', 'Diagram updated', ['diagram' => $this->sanitize($this->repo->getDiagram((string)$params['public_id']))]);
+        return JsonResponse::success('DIAGRAM_UPDATED', 'Diagram updated', ['diagram' => $this->sanitize($this->repo->getDiagram($organizationId, $publicId))]);
     }
 
     /**
@@ -208,11 +267,14 @@ final class DrawioController
      */
     public function deleteDiagram(array $params): JsonResponse
     {
+        $organizationId = $this->organizationId();
+        if ($organizationId <= 0) return JsonResponse::error('WORKSPACE_REQUIRED', 'Select an active workspace', 409);
         if (!$this->hasPermission('module.drawio.manage')) {
             return JsonResponse::error('FORBIDDEN', 'Insufficient permissions', 403);
         }
 
-        $diagram = $this->repo->getDiagram((string)$params['public_id']);
+        $publicId = (string)($params['public_id'] ?? '');
+        $diagram = $this->repo->getDiagram($organizationId, $publicId);
         if (!$diagram) {
             return JsonResponse::error('NOT_FOUND', 'Diagram not found', 404);
         }
@@ -220,7 +282,7 @@ final class DrawioController
             return JsonResponse::error('FORBIDDEN', 'Insufficient permissions', 403);
         }
 
-        $this->repo->deleteDiagram((string)$params['public_id']);
+        $this->repo->deleteDiagram($organizationId, $publicId);
         return JsonResponse::success('DIAGRAM_DELETED', 'Diagram deleted');
     }
 }

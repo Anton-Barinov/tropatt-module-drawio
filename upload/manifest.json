@@ -1,6 +1,6 @@
 {
     "name": "crm.drawio",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "vendor": "crm",
     "author": "Anton Barinov",
     "author_url": "https://github.com/Anton-Barinov",
@@ -10,7 +10,10 @@
     "license": "MIT",
     "category": "diagram",
     "dependencies": [],
-    "require_permissions": ["knowledge.view", "knowledge.edit"],
+    "require_permissions": [
+        "knowledge.view",
+        "knowledge.edit"
+    ],
     "api_routes": "api/config/routes.php",
     "web_routes": "web/config/routes.php",
     "migrations": "api/migration/",
@@ -18,13 +21,16 @@
         "js_routes": {
             "module-drawio": "web/assets/js/drawio.js"
         },
-        "css": ["web/assets/css/drawio.css"]
+        "css": [
+            "web/assets/css/drawio.css"
+        ]
     },
-    "hooks": {},
+    "hooks": [],
     "menu_items": [],
     "service_provider": "Module\\Crm\\Drawio\\DrawioServiceProvider",
     "config_defaults": {
         "editor_url": "https://embed.diagrams.net/?embed=1&ui=atlas&spin=1&modified=unsavedChanges&proto=json",
         "max_xml_bytes": 2000000
-    }
+    },
+    "signature": "d7acfae0a839d5952e0f13aabdd406660c714b1b355a6807bd97d0246c743ffa"
 }

@@ -4,6 +4,7 @@
     const API_PREFIX = '_module/crm.drawio';
     const EDITOR_URL = 'https://embed.diagrams.net/?embed=1&ui=atlas&spin=1&modified=unsavedChanges&proto=json';
     const VIEWER_URL = 'https://embed.diagrams.net/?embed=1&ui=atlas&spin=1&proto=json&noSaveBtn=1&saveAndExit=0&noExitBtn=1';
+    const EDITOR_ORIGIN = 'https://embed.diagrams.net';
 
     let state = {
         editingId: null,
@@ -40,7 +41,7 @@
     }
 
     function openViewer(publicId) {
-        api('/diagrams/' + publicId, 'GET').then(function (data) {
+        api('/diagrams/' + encodeURIComponent(publicId), 'GET').then(function (data) {
             const d = data.diagram || data || {};
             document.getElementById('drawioList').classList.add('d-none');
             document.getElementById('drawioEditor').classList.remove('d-none');
@@ -77,10 +78,10 @@
                 diagrams.map(function (d) {
                     return '<tr data-title="' + htmlEscape((d.title || '').toLowerCase()) + '">' +
                         '<td><strong>' + htmlEscape(d.title) + '</strong></td>' +
-                        '<td><code class="text-muted">' + htmlEscape(d.page_public_id || '—') + '</code></td>' +
-                        '<td class="text-muted">' + htmlEscape(d.updated_at || '') + '</td>' +
+                '<td><code class="text-muted">' + htmlEscape(d.page_public_id || '—') + '</code></td>' +
+                '<td class="text-muted">' + htmlEscape(d.updated_at || '') + '</td>' +
                         '<td class="text-end"><div class="btn-group">' +
-                        '<button class="btn btn-sm crm-btn-secondary edit-diagram-btn" data-id="' + htmlEscape(d.public_id) + '"><i class="fa-solid fa-pen"></i></button>' +
+                '<button class="btn btn-sm crm-btn-secondary edit-diagram-btn" data-id="' + htmlEscape(d.public_id) + '"><i class="fa-solid fa-pen"></i></button>' +
                         '<button class="btn btn-sm crm-btn-secondary embed-diagram-btn" data-id="' + htmlEscape(d.public_id) + '" data-title="' + htmlEscape(d.title) + '"><i class="fa-solid fa-code"></i></button>' +
                         '<button class="btn btn-sm crm-btn-danger-soft delete-diagram-btn" data-id="' + htmlEscape(d.public_id) + '"><i class="fa-solid fa-trash"></i></button>' +
                         '</div></td></tr>';
@@ -95,8 +96,8 @@
             });
             container.querySelectorAll('.delete-diagram-btn').forEach(function (btn) {
                 btn.addEventListener('click', function () {
-                    if (confirm('Удалить диаграмму?')) {
-                        api('/diagrams/' + btn.dataset.id, 'DELETE').then(function () { loadDiagrams(); })
+                    if (confirm(window.CRM.i18n.t('drawio.confirm_delete_diagram', 'Удалить диаграмму?'))) {
+                    api('/diagrams/' + encodeURIComponent(btn.dataset.id), 'DELETE').then(function () { loadDiagrams(); })
                             .catch(function (err) { alert(err.message); });
                     }
                 });
@@ -123,7 +124,7 @@
         document.getElementById('drawioEditor').classList.remove('d-none');
 
         if (publicId) {
-            api('/diagrams/' + publicId, 'GET').then(function (data) {
+            api('/diagrams/' + encodeURIComponent(publicId), 'GET').then(function (data) {
                 const d = data.diagram || data || {};
                 document.getElementById('diagramTitleInput').value = d.title || '';
                 document.getElementById('diagramPageInput').value = d.page_public_id || '';
@@ -148,26 +149,39 @@
         state.frame.setAttribute('width', '100%');
         state.frame.setAttribute('height', '100%');
         state.frame.setAttribute('style', 'border:0; min-height: 70vh;');
-        state.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-downloads allow-popups');
+        state.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads allow-popups');
         state.frame.setAttribute('referrerpolicy', 'no-referrer');
         state.pendingXml = xml || '';
         wrap.appendChild(state.frame);
     }
 
     function onFrameMessage(event) {
-        if (!state.frame || event.source !== state.frame.contentWindow) {
-            return;
-        }
-        if (typeof event.data !== 'object' || event.data === null) {
+        if (!state.frame || event.source !== state.frame.contentWindow || event.origin !== EDITOR_ORIGIN) {
             return;
         }
 
-        const msg = event.data;
+        // The draw.io embed editor (proto=json) posts its messages as JSON
+        // *strings* (see the official jgraph/drawio-integration example, which
+        // parses with JSON.parse(evt.data)). Accept both plain objects and
+        // stringified JSON so events like init/save/export are never missed.
+        let raw = event.data;
+        if (typeof raw === 'string' && raw.length > 0) {
+            try {
+                raw = JSON.parse(raw);
+            } catch (e) {
+                return;
+            }
+        }
+        if (typeof raw !== 'object' || raw === null) {
+            return;
+        }
+
+        const msg = raw;
 
         if (msg.event === 'init') {
             // Load the pending XML once the editor is ready.
             const xml = state.pendingXml || defaultDiagramXml();
-            state.frame.contentWindow.postMessage(JSON.stringify({ action: 'load', xml: xml }), '*');
+            state.frame.contentWindow.postMessage(JSON.stringify({ action: 'load', xml: xml }), EDITOR_ORIGIN);
             return;
         }
 
@@ -175,16 +189,19 @@
             state.loadedXml = msg.xml;
         }
 
-        if (msg.event === 'export' && typeof msg.data === 'string') {
-            state.loadedXml = msg.data;
+        if (msg.event === 'export') {
+            // For format 'xml' the raw diagram XML comes back in msg.xml; keep
+            // msg.data as a fallback for other formats.
+            state.loadedXml = (typeof msg.xml === 'string' && msg.xml) ? msg.xml : (typeof msg.data === 'string' ? msg.data : '');
             persistDiagram();
         }
     }
 
     function saveDiagram() {
         if (!state.frame) return;
-        // Ask the editor to export the current diagram as XML.
-        state.frame.contentWindow.postMessage(JSON.stringify({ action: 'export', format: 'xmlsvg', spin: 'Сохранение...' }), '*');
+        // Ask the editor to export the current diagram as raw XML (fastest and
+        // reloads cleanly back into the editor on next open).
+        state.frame.contentWindow.postMessage(JSON.stringify({ action: 'export', format: 'xml', spin: 'Сохранение...' }), EDITOR_ORIGIN);
     }
 
     function persistDiagram() {
@@ -193,18 +210,18 @@
         const xml = state.loadedXml || state.pendingXml || '';
 
         if (!title) {
-            alert('Укажите название диаграммы.');
+            alert(window.CRM.i18n.t('drawio.title_required', 'Укажите название диаграммы.'));
             return;
         }
         if (!xml) {
-            alert('Диаграмма пуста.');
+            alert(window.CRM.i18n.t('drawio.diagram_empty', 'Диаграмма пуста.'));
             return;
         }
 
         const body = { title: title, page_public_id: page || null, xml_content: xml };
 
         const action = state.editingId
-            ? api('/diagrams/' + state.editingId, 'PATCH', body)
+            ? api('/diagrams/' + encodeURIComponent(state.editingId), 'PATCH', body)
             : api('/diagrams', 'POST', body);
 
         action.then(function () {
@@ -231,7 +248,7 @@
         const viewUrl = base + '?route=module-drawio&view=' + encodeURIComponent(publicId);
         const snippet = '<iframe src="' + viewUrl + '" width="100%" height="600" style="border:0" title="' + htmlEscape(title) + '"></iframe>';
 
-        prompt('Вставьте этот код в HTML-содержимое страницы базы знаний:', snippet);
+        prompt(window.CRM.i18n.t('drawio.embed_prompt', 'Вставьте этот код в HTML-содержимое страницы базы знаний:'), snippet);
     }
 
     function defaultDiagramXml() {

@@ -24,13 +24,15 @@ final class DrawioRepository
     /**
      * @return array<int, array<string, mixed>>
      */
-    public function listDiagrams(?string $pagePublicId = null): array
+    public function listDiagrams(int $organizationId, ?string $pagePublicId = null): array
     {
+        if ($organizationId <= 0) return [];
         if ($pagePublicId !== null && $pagePublicId !== '') {
-            $stmt = $this->pdo->prepare('SELECT id, public_id, title, page_public_id, created_by_user_id, created_at, updated_at FROM module_drawio_diagrams WHERE page_public_id = :page ORDER BY updated_at DESC');
-            $stmt->execute(['page' => $pagePublicId]);
+            $stmt = $this->pdo->prepare('SELECT id, public_id, title, page_public_id, organization_id, created_by_user_id, created_at, updated_at FROM module_drawio_diagrams WHERE organization_id = :organization_id AND page_public_id = :page ORDER BY updated_at DESC LIMIT 500');
+            $stmt->execute(['organization_id' => $organizationId, 'page' => $pagePublicId]);
         } else {
-            $stmt = $this->pdo->query('SELECT id, public_id, title, page_public_id, created_by_user_id, created_at, updated_at FROM module_drawio_diagrams ORDER BY updated_at DESC');
+            $stmt = $this->pdo->prepare('SELECT id, public_id, title, page_public_id, organization_id, created_by_user_id, created_at, updated_at FROM module_drawio_diagrams WHERE organization_id = :organization_id ORDER BY updated_at DESC LIMIT 500');
+            $stmt->execute(['organization_id' => $organizationId]);
         }
         return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
@@ -38,10 +40,11 @@ final class DrawioRepository
     /**
      * @return array<string, mixed>|null
      */
-    public function getDiagram(string $publicId): ?array
+    public function getDiagram(int $organizationId, string $publicId): ?array
     {
-        $stmt = $this->pdo->prepare('SELECT id, public_id, title, page_public_id, xml_content, created_by_user_id, created_at, updated_at FROM module_drawio_diagrams WHERE public_id = :public_id LIMIT 1');
-        $stmt->execute(['public_id' => $publicId]);
+        if ($organizationId <= 0) return null;
+        $stmt = $this->pdo->prepare('SELECT id, public_id, title, page_public_id, organization_id, xml_content, created_by_user_id, created_at, updated_at FROM module_drawio_diagrams WHERE organization_id = :organization_id AND public_id = :public_id LIMIT 1');
+        $stmt->execute(['organization_id' => $organizationId, 'public_id' => $publicId]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
         return is_array($row) ? $row : null;
     }
@@ -54,9 +57,10 @@ final class DrawioRepository
     {
         $publicId = $this->publicId();
         $now = $this->now();
-        $stmt = $this->pdo->prepare('INSERT INTO module_drawio_diagrams (public_id, title, page_public_id, xml_content, created_by_user_id, created_at, updated_at) VALUES (:public_id, :title, :page_public_id, :xml_content, :created_by_user_id, :created_at, :updated_at)');
+        $stmt = $this->pdo->prepare('INSERT INTO module_drawio_diagrams (public_id, organization_id, title, page_public_id, xml_content, created_by_user_id, created_at, updated_at) VALUES (:public_id, :organization_id, :title, :page_public_id, :xml_content, :created_by_user_id, :created_at, :updated_at)');
         $stmt->execute([
             'public_id' => $publicId,
+            'organization_id' => (int)$data['organization_id'],
             'title' => $data['title'],
             'page_public_id' => $data['page_public_id'] ?? null,
             'xml_content' => $data['xml_content'],
@@ -64,16 +68,17 @@ final class DrawioRepository
             'created_at' => $now,
             'updated_at' => $now,
         ]);
-        return $this->getDiagram($publicId) ?? ['public_id' => $publicId];
+        return $this->getDiagram((int)$data['organization_id'], $publicId) ?? ['public_id' => $publicId];
     }
 
     /**
      * @param array<string, mixed> $data
      */
-    public function updateDiagram(string $publicId, array $data): void
+    public function updateDiagram(int $organizationId, string $publicId, array $data): void
     {
         $sets = [];
-        $params = ['public_id' => $publicId];
+        if ($organizationId <= 0) return;
+        $params = ['public_id' => $publicId, 'organization_id' => $organizationId];
         foreach (['title', 'page_public_id', 'xml_content'] as $field) {
             if (array_key_exists($field, $data)) {
                 $sets[] = "$field = :$field";
@@ -85,11 +90,12 @@ final class DrawioRepository
         }
         $params['updated_at'] = $this->now();
         $sets[] = 'updated_at = :updated_at';
-        $this->pdo->prepare('UPDATE module_drawio_diagrams SET ' . implode(', ', $sets) . ' WHERE public_id = :public_id')->execute($params);
+        $this->pdo->prepare('UPDATE module_drawio_diagrams SET ' . implode(', ', $sets) . ' WHERE organization_id = :organization_id AND public_id = :public_id')->execute($params);
     }
 
-    public function deleteDiagram(string $publicId): void
+    public function deleteDiagram(int $organizationId, string $publicId): void
     {
-        $this->pdo->prepare('DELETE FROM module_drawio_diagrams WHERE public_id = :public_id')->execute(['public_id' => $publicId]);
+        if ($organizationId <= 0) return;
+        $this->pdo->prepare('DELETE FROM module_drawio_diagrams WHERE organization_id = :organization_id AND public_id = :public_id')->execute(['organization_id' => $organizationId, 'public_id' => $publicId]);
     }
 }
